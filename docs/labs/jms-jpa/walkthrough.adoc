@@ -1,0 +1,163 @@
+:walkthrough: Lab Introduction
+:user-password: openshift
+:namespace: {user-username}
+
+:experimental:
+
+:article-url: https://developers.redhat.com/articles/2023/08/15/some-article-url
+
+ifdef::env-github[]
+endif::[]
+
+[id='lab-intro']
+= Camel Quarkus - JMS-JPA Lab
+
+An example Camel Quarkus application that supports JTA transactions on databases and message queues.
+
+This hands-on lab is based on the following blog article in Red Hat Developers:
+
+* link:{article-url}[window="_blank", , id="rhd-source-article"]
+
+{empty} +
+
+Assuming you have followed the article's instructions, you should be all set to get hands-on with _Camel Quarkus_ in the _OpenShift Dev Spaces_ workspace.
+
+This example builds on the JTA-JPA example, which should be completed before this tutorial as it describes the use of database XA transaction scenarios for databases and XAResources. The focus of this tutorial will be how JMS can be integrated with databases.
+
+{empty} +
+
+
+[time=1]
+[id="section-one"]
+== Explore the source code
+
+All the source code for this example can be found in the project explorer under the `jms-jpa` directory.
+
+=== Routes
+
+The route definition can be found in the following file:
+
+--
+`src/main/java/org/acme/CamelRoutes.java`
+--
+
+The route is almost identical to that in the `jta-jpa` example. Two REST endpoints are defined: a `get` request will return all audit logs queried from the database; and a `post` endpoint that handles the creation of new audit messages.
+
+The `direct:trans` route is largely borrowed from the `jta-jpa` example - it stores audit messages using the `jpa` component, as well as rolling back failed transactions and terminating the application when a `crash` message is received. The only addition to this route is 
+
+----
+to("jms:outbound?disableReplyTo=true")
+----
+
+The message is sent to the `outbound` JMS queue for processing in another route. The `disableReplyTo` option prevents Camel from waiting for a reply from the broker. 
+
+The final route processes messages sent to the `outbound` message queue:
+
+----
+from("xajms:outbound")
+        .transacted()
+        .log("Message out: ${body}")
+        .to("bean:auditLog?method=createAuditLog(${body}-ok)")
+        .to("jpa:org.acme.AuditLog");
+----
+
+The `xajms` component uses an instance of the JMS component that has been configured for use with XA transactions. This will be examined in more detail in the next section. It acts as a consumer on the `outbound` queue, creating an additional audit log for each message with the `-ok` suffix, which are then persisted using JPA. 
+
+
+{empty} +
+
+[time=3]
+[id="section-two"]
+== Run the example
+
+The example can either be launched in OpenShift Dev Spaces by running a VS Code task, or entering commands directly in a terminal.
+
+To start the example from a task, open the menu and selecting `Terminal > Run Task...` and then select `devfile: start-jms-jpa`.
+
+Alternatively, you can open a terminal from the menu by selecting `Terminal > New Terminal (Select a container)` and selecting the `tools` container. Then copy and paste the following commands:
+
+[source, subs=]
+----
+cd /projects/examples/jms-jpa && mvn -Dquarkus.profile=k8s clean quarkus:dev
+----
+
+Once the example is built and running, you should see output similar to the following:
+
+----
+2023-11-29 09:59:57,449 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread) Apache Camel 4.0.0 (camel-1) is starting
+2023-11-29 09:59:57,488 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread) Using 2 instances of same component class: org.apache.camel.component.jms.JmsComponent with names: jms, xajms
+2023-11-29 09:59:57,490 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread) Routes startup (started:5)
+2023-11-29 09:59:57,490 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread)     Started route1 (direct://messages)
+2023-11-29 09:59:57,491 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread)     Started route2 (direct://trans)
+2023-11-29 09:59:57,491 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread)     Started route3 (xajms://outbound)
+2023-11-29 09:59:57,492 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread)     Started route4 (rest://get:/messages)
+2023-11-29 09:59:57,492 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread)     Started route5 (rest://post:/messages:/%7Bmessage%7D)
+2023-11-29 09:59:57,493 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (Quarkus Main Thread) Apache Camel 4.0.0 (camel-1) started in 42ms (build:0ms init:0ms start:42ms)
+2023-11-29 09:59:57,505 INFO  [org.acm.DummyXAResourceRecovery] (Quarkus Main Thread) register DummyXAResourceRecovery
+----
+
+You can post a message to the example application by either running the `devfile: send-hello` task, or running the following command in the `tools` console:
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/messages/hello
+----
+
+You should see the `hello` message on the console.
+
+To verify that the message was stored in the database, you can run the `devfile:get-messages` task, or run the following command from the `tools` console:
+
+[source,bash]
+----
+curl http://localhost:8080/api/messages/
+----
+
+You should see the `hello` message listed in the console.
+
+You can test for transaction roll-back by sending the `fail` message. Again, either run the `devfile:send-fail` task, or run the following command:
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/messages/fail
+----
+
+In this case, the route logic caused an exception to be thrown, so the database transaction was rolled back. If you run the `devfile:get-messages` task again, you should just see the original `hello` message on the console. The `fail` message will not be listed.
+
+Finally, you can test the crash recovery process by first sending the `crash` message by either running the `devfile:send-crash` or running the following command:
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/api/messages/crash
+----
+
+This will cause the example to terminate and the curl command will exit with an error saying it received an empty message from the server. Restart the application by re-running the `devfile:start-jta-jpa` task, or running the following command in the `tools` console:
+
+[source,bash]
+----
+mvn -Dquarkus.profile=k8s quarkus:dev
+----
+
+Note: Do not run `mvn clean` as this will remove the persistent transaction data, so the transaction will not be recovered and the crash message will be lost.
+
+After a few seconds, you should log messages similar to the following indicating that the DummyXAResource transaction was committed:
+
+----
+2023-11-29 10:48:33,210 INFO  [org.acm.DummyXAResourceRecovery] (Periodic Recovery) DummyXAResourceRecovery returning list of resources: [org.acme.DummyXAResource@63de7d20]
+2023-11-29 10:48:33,224 INFO  [org.acm.DummyXAResource] (Periodic Recovery) Committing DummyXAResource
+2023-11-29 10:48:33,238 INFO  [route3] (Camel (camel-1) thread #1 - JmsConsumer[outbound]) Message out: crash
+----
+
+Running the `devfile:get-messages` task one final time will display the original `hello` messages and the recovered `crash` and `crash-ok` messages.
+
+{empty} +
+
+[type=verification]
+Did you obtain the same output as shown above?
+
+[type=verificationSuccess]
+You've successfully tested the example !!
+
+[type=verificationFail]
+Inspect the console logs to investigate the possible causes of failure.
+
+{empty} +
